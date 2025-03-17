@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebRTC Video Stream</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        h1 {
+            color: #333;
+        }
+        video {
+            width: 100%;
+            max-width: 640px;
+            background-color: #000;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            margin: 15px 0;
+        }
+        button {
+            background-color: #4CAF50;
+            border: none;
+            color: white;
+            padding: 10px 20px;
+            text-align: center;
+            text-decoration: none;
+            display: inline-block;
+            font-size: 16px;
+            margin: 10px 2px;
+            cursor: pointer;
+            border-radius: 4px;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        #status {
+            margin: 10px 0;
+            padding: 10px;
+            border-radius: 4px;
+            background-color: #f8f8f8;
+        }
+        .log {
+            margin: 10px 0;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            background-color: #f8f8f8;
+            height: 200px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <h1>WebRTC Video Stream</h1>
+    <div id="status">Connection: <span id="connectionStatus">Disconnected</span></div>
+    <video id="video" autoplay playsinline muted></video>
+    <div>
+        <button id="startStream">Start Stream</button>
+        <button id="stopStream">Stop Stream</button>
+    </div>
+    <h3>Log</h3>
+    <div class="log" id="logArea"></div>
+
+    <script>
+        // Configuration
+        const wsUrl = "ws://secretundergroundroboticslaboratory.com:8080/ws"; // Change to your server's URL
+        
+        // Elements
+        const videoEl = document.getElementById('video');
+        const startBtn = document.getElementById('startStream');
+        const stopBtn = document.getElementById('stopStream');
+        const connectionStatus = document.getElementById('connectionStatus');
+        const logArea = document.getElementById('logArea');
+        
+        // State
+        let ws = null;
+        let pc = null;
+        let connected = false;
+        
+        // Utilities
+        function log(message) {
+            console.log(message);
+            const line = document.createElement('div');
+            line.textContent = `${new Date().toLocaleTimeString()} - ${message}`;
+            logArea.appendChild(line);
+            logArea.scrollTop = logArea.scrollHeight;
+        }
+        
+        function updateStatus(status) {
+            connectionStatus.textContent = status;
+        }
+        
+        // WebRTC setup
+        function setupPeerConnection() {
+            if (pc) {
+                pc.close();
+            }
+            
+            pc = new RTCPeerConnection({
+                iceServers: [
+                    { urls: "stun:stun.l.google.com:19302" },
+                    { urls: "stun:stun1.l.google.com:19302" }
+                ]
+            });
+            
+            // Handle ICE candidates
+            pc.onicecandidate = (event) => {
+                if (event.candidate) {
+                    log("Sending ICE candidate to server");
+                    ws.send(JSON.stringify({ 
+                        type: "ice-candidate", 
+                        candidate: event.candidate 
+                    }));
+                }
+            };
+            
+            // Handle connection state changes
+            pc.onconnectionstatechange = () => {
+                log(`WebRTC connection state: ${pc.connectionState}`);
+                
+                if (pc.connectionState === 'connected') {
+                    updateStatus('Connected - Stream Active');
+                    connected = true;
+                } else if (pc.connectionState === 'disconnected' || 
+                           pc.connectionState === 'failed' || 
+                           pc.connectionState === 'closed') {
+                    updateStatus('Disconnected');
+                    connected = false;
+                }
+            };
+            
+            // Handle incoming tracks
+            pc.ontrack = (event) => {
+                log("Received remote video stream");
+                videoEl.srcObject = event.streams[0];
+            };
+            
+            log("WebRTC connection initialized");
+        }
+        
+        // WebSocket setup
+        function connectWebSocket() {
+            if (ws) {
+                ws.close();
+            }
+            
+            updateStatus('Connecting to server...');
+            ws = new WebSocket(wsUrl);
+            
+            ws.onopen = () => {
+                log("Connected to WebSocket server");
+                updateStatus('Connected to server - ready to stream');
+                setupPeerConnection();
+            };
+            
+            ws.onclose = () => {
+                log("Disconnected from WebSocket server");
+                updateStatus('Disconnected');
+                connected = false;
+            };
+            
+            ws.onerror = (error) => {
+                log("WebSocket error: " + error.message);
+                updateStatus('Connection error');
+            };
+            
+            ws.onmessage = async (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    log(`Received ${data.type} from server`);
+                    
+                    switch (data.type) {
+                        case "offer":
+                            log("Processing SDP offer");
+                            await pc.setRemoteDescription(new RTCSessionDescription({ 
+                                type: "offer", 
+                                sdp: data.sdp 
+                            }));
+                            
+                            // Create and send answer
+                            const answer = await pc.createAnswer();
+                            await pc.setLocalDescription(answer);
+                            
+                            ws.send(JSON.stringify({ 
+                                type: "answer", 
+                                sdp: answer.sdp 
+                            }));
+                            
+                            log("Sent SDP answer to server");
+                            break;
+                            
+                        case "ice-candidate":
+                            if (data.candidate) {
+                                log("Adding received ICE candidate");
+                                try {
+                                    await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+                                } catch (error) {
+                                    log("Error adding received ICE candidate: " + error);
+                                }
+                            }
+                            break;
+                            
+                        case "error":
+                            log(`Server error: ${data.error} - ${data.message}`);
+                            break;
+                            
+                        default:
+                            log(`Unhandled message type: ${data.type}`);
+                    }
+                } catch (error) {
+                    log("Error processing message: " + error);
+                }
+            };
+        }
+        
+        // Button handlers
+        startBtn.addEventListener("click", () => {
+            log("Starting stream...");
+            
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                connectWebSocket();
+            }
+            
+            // Request an offer from the server to start streaming
+            if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: "offer" }));
+                log("Requested offer from server");
+            } else {
+                log("WebSocket not connected, please try again in a moment");
+            }
+        });
+        
+        stopBtn.addEventListener("click", () => {
+            log("Stopping stream...");
+            
+            if (pc) {
+                pc.close();
+                pc = null;
+            }
+            
+            if (videoEl.srcObject) {
+                videoEl.srcObject.getTracks().forEach(track => track.stop());
+                videoEl.srcObject = null;
+            }
+            
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+            
+            connected = false;
+            updateStatus('Disconnected');
+            log("Stream stopped");
+        });
+        
+        // Initial setup
+        connectWebSocket();
+    </script>
+</body>
+</html>
