@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Low Latency WebRTC Stream</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        h1 {
+            color: #333;
+        }
+        video {
+            width: 100%;
+            max-width: 640px;
+            background-color: #000;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            margin: 15px 0;
+        }
+        button {
+            background-color: #4CAF50;
+            border: none;
+            color: white;
+            padding: 10px 20px;
+            text-align: center;
+            text-decoration: none;
+            display: inline-block;
+            font-size: 16px;
+            margin: 10px 2px;
+            cursor: pointer;
+            border-radius: 4px;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        #status {
+            margin: 10px 0;
+            padding: 10px;
+            border-radius: 4px;
+            background-color: #f8f8f8;
+        }
+        .log {
+            margin: 10px 0;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            background-color: #f8f8f8;
+            height: 150px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 14px;
+        }
+        .stats {
+            margin: 10px 0;
+            padding: 10px;
+            background-color: #f8f8f8;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Low Latency WebRTC Stream</h1>
+    <div id="status">Connection: <span id="connectionStatus">Disconnected</span></div>
+    
+    <video id="video" autoplay playsinline muted></video>
+    
+    <div>
+        <button id="startBtn">Start Stream</button>
+        <button id="stopBtn" disabled>Stop Stream</button>
+    </div>
+    
+    <div class="stats">
+        <div>Latency: <span id="latency">N/A</span></div>
+        <div>Frame rate: <span id="framerate">N/A</span></div>
+        <div>Resolution: <span id="resolution">N/A</span></div>
+    </div>
+    
+    <h3>Log</h3>
+    <div class="log" id="logArea"></div>
+
+    <script>
+        // Configuration
+        const wsUrl = "ws://secretundergroundroboticslaboratory.com/ws"; // Updated to use Apache proxy
+        
+        // Elements
+        const videoEl = document.getElementById('video');
+        const startBtn = document.getElementById('startBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const connectionStatus = document.getElementById('connectionStatus');
+        const logArea = document.getElementById('logArea');
+        const latencyEl = document.getElementById('latency');
+        const framerateEl = document.getElementById('framerate');
+        const resolutionEl = document.getElementById('resolution');
+        
+        // State
+        let ws = null;
+        let pc = null;
+        let connected = false;
+        let statsInterval = null;
+        
+        // Utilities
+        function log(message) {
+            console.log(message);
+            const line = document.createElement('div');
+            line.textContent = `${new Date().toLocaleTimeString()} - ${message}`;
+            logArea.appendChild(line);
+            logArea.scrollTop = logArea.scrollHeight;
+        }
+        
+        function updateStatus(status) {
+            connectionStatus.textContent = status;
+        }
+        
+        function updateButtonState(isConnected) {
+            startBtn.disabled = isConnected;
+            stopBtn.disabled = !isConnected;
+        }
+        
+        // WebRTC setup
+        function setupPeerConnection() {
+            if (pc) {
+                pc.close();
+            }
+            
+            // Create peer connection with specific configuration for low latency
+            // No STUN servers needed for direct client-server connection
+            pc = new RTCPeerConnection({
+                iceServers: [], // Empty - no STUN/TURN needed for direct connection
+                bundlePolicy: 'max-bundle',
+                rtcpMuxPolicy: 'require',
+                sdpSemantics: 'unified-plan'
+            });
+            
+            // Handle ICE candidates
+            pc.onicecandidate = (event) => {
+                if (event.candidate) {
+                    log("Sending ICE candidate");
+                    ws.send(JSON.stringify({ 
+                        type: "ice-candidate", 
+                        candidate: event.candidate 
+                    }));
+                }
+            };
+            
+            // Handle connection state changes
+            pc.onconnectionstatechange = () => {
+                log(`WebRTC connection state: ${pc.connectionState}`);
+                
+                if (pc.connectionState === 'connected') {
+                    updateStatus('Connected - Stream Active');
+                    connected = true;
+                    updateButtonState(true);
+                    startStats();
+                } else if (pc.connectionState === 'disconnected' || 
+                           pc.connectionState === 'failed' || 
+                           pc.connectionState === 'closed') {
+                    updateStatus('Disconnected');
+                    connected = false;
+                    updateButtonState(false);
+                    stopStats();
+                }
+            };
+            
+            // Handle incoming tracks
+            pc.ontrack = (event) => {
+                log("Received remote video stream");
+                
+                const stream = event.streams[0];
+                
+                // Configure video element for low latency
+                videoEl.srcObject = stream;
+                videoEl.play();
+                
+                // These are important for low latency!
+                videoEl.muted = true;
+                videoEl.autoplay = true;
+                videoEl.playsInline = true;
+                
+                // Setting minimal latency buffer
+                if ('LatencyHint' in MediaStream) {
+                    stream.setLatencyHint('lowLatency');
+                }
+                
+                if (videoEl.mozNoiseSuppression !== undefined) {
+                    videoEl.mozNoiseSuppression = false;
+                }
+                
+                if (videoEl.mozAutoGainControl !== undefined) {
+                    videoEl.mozAutoGainControl = false;
+                }
+                
+                // Some browsers may need this
+                if (videoEl.setLatencyHint) {
+                    videoEl.setLatencyHint('lowLatency');
+                }
+            };
+            
+            log("WebRTC connection initialized with low latency settings");
+        }
+        
+        // WebSocket setup
+        function connectWebSocket() {
+            if (ws) {
+                ws.close();
+            }
+            
+            updateStatus('Connecting to server...');
+            ws = new WebSocket(wsUrl);
+            
+            ws.onopen = () => {
+                log("Connected to WebSocket server");
+                updateStatus('Connected to server - ready to stream');
+                setupPeerConnection();
+            };
+            
+            ws.onclose = () => {
+                log("Disconnected from WebSocket server");
+                updateStatus('Disconnected');
+                connected = false;
+                updateButtonState(false);
+                stopStats();
+            };
+            
+            ws.onerror = (error) => {
+                log("WebSocket error");
+                updateStatus('Connection error');
+            };
+            
+            ws.onmessage = async (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    log(`Received ${data.type} from server`);
+                    
+                    switch (data.type) {
+                        case "offer":
+                            log("Processing SDP offer");
+                            try {
+                                // Configure for low latency
+                                const offer = {
+                                    type: "offer",
+                                    sdp: data.sdp
+                                };
+                                
+                                await pc.setRemoteDescription(offer);
+                                
+                                // Create answer with low latency constraints
+                                const answer = await pc.createAnswer({
+                                    // Force using UDP for all media to reduce latency
+                                    iceRestart: false,
+                                    voiceActivityDetection: false
+                                });
+                                
+                                // Add low latency SDP modifications
+                                answer.sdp = answer.sdp.replace('useinbandfec=1', 'useinbandfec=1; stereo=0; maxaveragebitrate=128000; maxplaybackrate=48000; cbr=0');
+                                
+                                // Set local description and send answer
+                                await pc.setLocalDescription(answer);
+                                
+                                ws.send(JSON.stringify({ 
+                                    type: "answer", 
+                                    sdp: answer.sdp 
+                                }));
+                                
+                                log("Sent SDP answer with low latency settings");
+                            } catch (error) {
+                                log("Error handling offer: " + error);
+                            }
+                            break;
+                            
+                        case "ice-candidate":
+                            if (data.candidate) {
+                                log("Adding received ICE candidate");
+                                try {
+                                    await pc.addIceCandidate(data.candidate);
+                                } catch (error) {
+                                    log("Error adding received ICE candidate: " + error);
+                                }
+                            }
+                            break;
+                            
+                        case "error":
+                            log(`Server error: ${data.error} - ${data.message}`);
+                            break;
+                            
+                        default:
+                            log(`Unhandled message type: ${data.type}`);
+                    }
+                } catch (error) {
+                    log("Error processing message: " + error);
+                }
+            };
+        }
+        
+        // Statistics
+        function startStats() {
+            if (statsInterval) {
+                clearInterval(statsInterval);
+            }
+            
+            let lastFramesDecoded = 0;
+            let lastTime = performance.now();
+            
+            statsInterval = setInterval(async () => {
+                if (!pc) return;
+                
+                try {
+                    const stats = await pc.getStats();
+                    let frameRate = 0;
+                    let width = 0;
+                    let height = 0;
+                    let currentDelay = 0;
+                    let jitter = 0;
+                    
+                    stats.forEach(report => {
+                        if (report.type === 'inbound-rtp' && report.kind === 'video') {
+                            const now = performance.now();
+                            const timeElapsed = (now - lastTime) / 1000; // Convert to seconds
+                            
+                            if (lastFramesDecoded && timeElapsed > 0) {
+                                frameRate = ((report.framesDecoded - lastFramesDecoded) / timeElapsed).toFixed(1);
+                            }
+                            
+                            lastFramesDecoded = report.framesDecoded;
+                            lastTime = now;
+                            
+                            jitter = report.jitter ? (report.jitter * 1000).toFixed(1) + ' ms' : 'N/A';
+                            currentDelay = report.jitterBufferDelay ? 
+                                (report.jitterBufferDelay * 1000).toFixed(1) + ' ms' : 'N/A';
+                            
+                            latencyEl.textContent = currentDelay !== 'N/A' ? 
+                                currentDelay + ' (jitter: ' + jitter + ')' : 'N/A';
+                        }
+                        
+                        if (report.type === 'track' && report.kind === 'video') {
+                            width = report.frameWidth;
+                            height = report.frameHeight;
+                            framerateEl.textContent = frameRate + ' fps';
+                            resolutionEl.textContent = width + 'x' + height;
+                        }
+                    });
+                } catch (e) {
+                    console.error("Error getting stats:", e);
+                }
+            }, 1000);
+        }
+        
+        function stopStats() {
+            if (statsInterval) {
+                clearInterval(statsInterval);
+                statsInterval = null;
+            }
+            
+            latencyEl.textContent = 'N/A';
+            framerateEl.textContent = 'N/A';
+            resolutionEl.textContent = 'N/A';
+        }
+        
+        // Button handlers
+        startBtn.addEventListener("click", () => {
+            log("Starting stream...");
+            
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                connectWebSocket();
+            }
+            
+            // Request an offer from the server to start streaming
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: "offer" }));
+                log("Requested offer from server");
+            } else {
+                log("WebSocket not connected, please try again in a moment");
+            }
+        });
+        
+        stopBtn.addEventListener("click", () => {
+            log("Stopping stream...");
+            
+            if (pc) {
+                pc.close();
+                pc = null;
+            }
+            
+            if (videoEl.srcObject) {
+                videoEl.srcObject.getTracks().forEach(track => track.stop());
+                videoEl.srcObject = null;
+            }
+            
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+            
+            connected = false;
+            updateStatus('Disconnected');
+            updateButtonState(false);
+            stopStats();
+            log("Stream stopped");
+        });
+        
+        // Initial setup - connect when page loads
+        connectWebSocket();
+    </script>
+</body>
+</html>

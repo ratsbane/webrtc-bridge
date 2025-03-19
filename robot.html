@@ -1,0 +1,638 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Robot Arm Control</title>
+    <style>
+        body { font-family: sans-serif; display: flex; }
+        #video-container { flex: 1; }
+        #controls { width: 250px; padding: 10px; border-left: 1px solid #ccc; }
+        #status { margin-top: 10px; }
+        #messages { margin-top: 10px; font-weight: bold; }
+        #gamepadStatus { margin-top: 10px; font-weight: bold; }
+        #key-guide { margin-top: 20px; }
+        #key-guide ul { list-style: none; padding: 0; }
+        #key-guide li { margin-bottom: 5px; }
+        #current-command { margin-top: 10px; font-weight: bold; color: blue; }
+        #command-history {
+            margin-top: 10px;
+            border: 1px solid #ccc;
+            height: 100px;
+            overflow-y: scroll;
+            padding: 5px;
+        }
+        #error-display {
+            margin-top: 10px;
+            color: red;
+            font-weight: bold;
+        }
+        #video {
+            width: 640px;
+            height: 480px;
+            background-color: #000;
+            border: 1px solid #ccc;
+        }
+        .stats {
+            margin-top: 10px;
+            font-size: 12px;
+            color: #666;
+        }
+        .connection-buttons {
+            margin-top: 10px;
+        }
+        .connection-buttons button {
+            margin-right: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div id="video-container">
+        <h1>Robot Arm Control</h1>
+        <!-- Replace static image with video element for WebRTC -->
+        <video id="video" autoplay playsinline muted></video>
+        <div class="connection-buttons">
+            <button id="startVideoBtn">Start Video</button>
+            <button id="stopVideoBtn" disabled>Stop Video</button>
+        </div>
+        <div class="stats">
+            <div>Latency: <span id="latency">N/A</span></div>
+            <div>Frame rate: <span id="framerate">N/A</span></div>
+            <div>Resolution: <span id="resolution">N/A</span></div>
+        </div>
+        <div id="videoStatus">Video: Not Connected</div>
+        <div id="status"></div>
+        <div id="messages"></div>
+    </div>
+
+    <div id="controls">
+        <p id="gamepad-status">Gamepad: Not Connected ❌</p>
+        <button id="gamepad-toggle" onclick="disconnectGamepad()" style="display: none;">Disconnect Gamepad</button>
+
+        <div id="key-guide">
+            <h3>Key Controls:</h3>
+            <ul>
+                <li><strong>Base:</strong> Left/Right Arrows</li>
+                <li><strong>Shoulder:</strong> Up/Down Arrows</li>
+                <li><strong>Elbow:</strong> W/S</li>
+                <li><strong>Wrist:</strong> A/D</li>
+                <li><strong>Hand:</strong> Y/H</li>
+                <li><strong>Thumb:</strong> T/G</li>
+                <li><strong>Stop All:</strong> Spacebar</li>
+            </ul>
+        </div>
+        <div id="current-command">Current Command: None</div>
+        <div id="error-display"></div>
+        <div id="command-history"></div>
+        <button id="reconnectButton">Reconnect Control</button>
+    </div>
+
+<script>
+    // ==== CONTROL WEBSOCKET CONNECTION ====
+    let socket;
+    let currentCommandDisplay = document.getElementById('current-command');
+    let commandHistoryDiv = document.getElementById('command-history');
+    let errorDisplay = document.getElementById('error-display');
+    let socketReady = false;
+    let reconnectInterval = 1000; // Initial reconnect delay (1 second)
+    let maxReconnectInterval = 30000; // Maximum reconnect delay (30 seconds)
+    let reconnectTimeout;
+
+    function connectSocket() {
+        // Connect to the WebSocket server on the Raspberry Pi via Apache proxy
+        socket = new WebSocket("ws://secretundergroundroboticslaboratory.com/robot-control/ws");
+	//socket = new WebSocket("ws://secretundergroundroboticslaboratory.com/robot-control");
+
+        socket.onopen = () => {
+            document.getElementById('status').innerText = 'Control Connected';
+            socketReady = true;
+            errorDisplay.innerText = ''; // Clear errors on successful connection
+            reconnectInterval = 1000; // Reset reconnect interval on successful connection
+            clearTimeout(reconnectTimeout); //Clear any pending reconnect attempts.
+        };
+
+        socket.onmessage = (event) => {
+            document.getElementById('messages').innerText = event.data;
+            addToCommandHistory("Received: " + event.data);
+        };
+
+        socket.onclose = (event) => {
+            document.getElementById('status').innerText = 'Control Disconnected';
+            socketReady = false;
+            console.log('WebSocket closed:', event);
+            scheduleReconnect(); // Attempt to reconnect
+        };
+
+        socket.onerror = (error) => {
+            errorDisplay.innerText = 'WebSocket Error: ' + error;
+            console.error('WebSocket error:', error);
+        };
+    }
+    function scheduleReconnect() {
+        if (!socketReady) { // Only attempt reconnect if not already connected/connecting
+            reconnectTimeout = setTimeout(() => {
+                console.log(`Attempting to reconnect (attempt ${reconnectInterval/1000}s)...`);
+                connectSocket();
+                reconnectInterval = Math.min(reconnectInterval * 2, maxReconnectInterval); // Exponential backoff
+            }, reconnectInterval);
+        }
+    }
+
+    connectSocket(); // Initial connection
+
+    document.getElementById('reconnectButton').addEventListener('click', () => {
+        if (socket && socket.readyState !== WebSocket.CLOSED) {
+            socket.close(); // Close any existing connection first
+        }
+        //Don't call connect socket directly. Call scheduleReconnect.
+        scheduleReconnect(); // Manually trigger a reconnect attempt
+    });
+
+    const pressedKeys = {}; // Keep track of pressed keys
+
+     function sendCommand(command) {
+        if (socketReady) {
+            console.log("Sending command:", JSON.stringify(command));
+            socket.send(JSON.stringify(command)); //SEND THE JSON STRING
+            currentCommandDisplay.innerText = `Current Command: ${JSON.stringify(command)}`;
+            addToCommandHistory("Sent: " + JSON.stringify(command)); // Add to history
+        } else {
+            errorDisplay.innerText = "Cannot send command: Socket not connected.";
+            console.log("Socket not ready, cannot send command:", command); // Log to console
+        }
+    }
+
+    function addToCommandHistory(entry) {
+        const commandElement = document.createElement('div');
+        commandElement.innerText = entry;
+        commandHistoryDiv.appendChild(commandElement);
+        commandHistoryDiv.scrollTop = commandHistoryDiv.scrollHeight;
+    }
+
+    document.addEventListener('keydown', (event) => {
+        if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+            event.preventDefault();
+        }
+
+        if (pressedKeys[event.key]) return; // Prevent repeated triggers
+        pressedKeys[event.key] = true;
+
+        // Prevent default browser behavior for all relevant keys
+        event.preventDefault();
+        event.stopPropagation();
+
+        let command = null;
+
+        switch (event.key) {
+            case 'ArrowLeft': command = { command: 'move', motor: 'base', direction: 'left' }; break;
+            case 'ArrowRight': command = { command: 'move', motor: 'base', direction: 'right' }; break;
+            case 'ArrowUp': command = { command: 'move', motor: 'shoulder', direction: 'up' }; break;
+            case 'ArrowDown': command = { command: 'move', motor: 'shoulder', direction: 'down' }; break;
+            case 'w': command = { command: 'move', motor: 'elbow', direction: 'up' }; break;
+            case 's': command = { command: 'move', motor: 'elbow', direction: 'down' }; break;
+            case 'a': command = { command: 'move', motor: 'wrist', direction: 'left' }; break;
+            case 'd': command = { command: 'move', motor: 'wrist', direction: 'right' }; break;
+            case 't': command = { command: 'move', motor: 'thumb', direction: 'inc' }; break;
+            case 'g': command = { command: 'move', motor: 'thumb', direction: 'dec' }; break;
+            case 'y': command = { command: 'move', motor: 'hand', direction: 'inc' }; break;
+            case 'h': command = { command: 'move', motor: 'hand', direction: 'dec' }; break;
+        }
+
+        if (command) {
+            sendCommand(command);
+            currentCommandDisplay.innerText = `Current Command: ${JSON.stringify(command)}`;
+        }
+    });
+
+    document.addEventListener('keyup', (event) => {
+        pressedKeys[event.key] = false;
+        currentCommandDisplay.innerText = `Current Command: None`;
+
+        let command = null;
+
+        switch (event.key) {
+            case 'ArrowLeft':
+            case 'ArrowRight': command = { command: 'stop', motor: 'base' }; break;
+            case 'ArrowUp':
+            case 'ArrowDown':  command = { command: 'stop', motor: 'shoulder' }; break;
+            case 'w':
+            case 's':          command = { command: 'stop', motor: 'elbow' }; break;
+            case 'a':
+            case 'd':          command = { command: 'stop', motor: 'wrist' }; break;
+            case 't':          command = { command: 'stop', motor: 'thumb' }; break; // Stop Thumb
+            case 'g':          command = { command: 'stop', motor: 'thumb' }; break; // Stop Thumb
+            case 'y':          command = { command: 'stop', motor: 'hand' }; break;  // Stop Hand
+            case 'h':          command = { command: 'stop', motor: 'hand' }; break;  // Stop Hand
+        }
+
+        if (command) {
+            sendCommand(command);
+        }
+    });
+
+    // --- Gamepad Support ---
+    let gamepadIndex = null;
+
+    const DEAD_ZONE = 0.4; // Ignore small joystick movements (increased from 0.2)
+    const MOVE_DELAY = 200; // Minimum time between movement commands (in ms)
+    let lastMoveTime = 0;
+    let lastCommands = {}; // Track last commands sent to prevent duplicates
+    let wristDirection = 1; // 1 = clockwise, -1 = counterclockwise
+    let thumbDirection = 1; // 1 = open, -1 = close
+    let handDirection = 1;  // 1 = open, -1 = close
+    let lastThumbTrigger = 0;
+    let lastHandTrigger = 0;
+
+    window.addEventListener("gamepadconnected", (event) => {
+        console.log("Gamepad connected:", event.gamepad);
+        updateGamepadStatus(true);
+        requestAnimationFrame(updateGamepad);
+    });
+
+    window.addEventListener("gamepaddisconnected", (event) => {
+        console.log("Gamepad disconnected:", event.gamepad);
+        updateGamepadStatus(false);
+    });
+
+    function updateGamepadStatus(connected) {
+        const gamepadStatus = document.getElementById("gamepad-status");
+        const gamepadButton = document.getElementById("gamepad-toggle");
+
+        if (connected) {
+            gamepadStatus.innerText = "Gamepad: Connected 🎮";
+            gamepadButton.innerText = "Disconnect Gamepad";
+            gamepadButton.style.display = "block"; // Show the button
+        } else {
+            gamepadStatus.innerText = "Gamepad: Not Connected ❌";
+            gamepadButton.innerText = "Connect Gamepad";
+            gamepadButton.style.display = "none"; // Hide the button if no gamepad
+        }
+    }
+
+    function disconnectGamepad() {
+        console.log("Gamepad disconnected manually.");
+        updateGamepadStatus(false);
+    }
+
+    function updateGamepad() {
+        const gamepads = navigator.getGamepads();
+        if (!gamepads[0]) return; // No gamepad connected
+
+        const gp = gamepads[0]; // Assuming one gamepad
+        const now = Date.now();
+        let command = null;
+
+        // **LEFT STICK - Base Rotation & Shoulder Movement**
+        let lx = gp.axes[0]; // Left stick horizontal (base rotation)
+        let ly = gp.axes[1]; // Left stick vertical (shoulder)
+
+        if (Math.abs(lx) > DEAD_ZONE) {
+            command = { command: "move", motor: "base", direction: lx > 0 ? "right" : "left" };
+        } else if (lastCommands["base"] !== "stop") {
+            command = { command: "stop", motor: "base" };
+        }
+
+        if (Math.abs(ly) > DEAD_ZONE) {
+            command = { command: "move", motor: "shoulder", direction: ly > 0 ? "down" : "up" };
+        } else if (lastCommands["shoulder"] !== "stop") {
+            command = { command: "stop", motor: "shoulder" };
+        }
+
+        // **RIGHT STICK - Elbow & Wrist**
+        let rx = gp.axes[2]; // Right stick horizontal (wrist)
+        let ry = gp.axes[3]; // Right stick vertical (elbow)
+
+        if (Math.abs(rx) > DEAD_ZONE) {
+            command = { command: "move", motor: "wrist", direction: rx > 0 ? "right" : "left" };
+        } else if (lastCommands["wrist"] !== "stop") {
+            command = { command: "stop", motor: "wrist" };
+        }
+
+        if (Math.abs(ry) > DEAD_ZONE) {
+            command = { command: "move", motor: "elbow", direction: ry > 0 ? "down" : "up" };
+        } else if (lastCommands["elbow"] !== "stop") {
+            command = { command: "stop", motor: "elbow" };
+        }
+
+        // **LEFT TRIGGER (LT) for Hand Toggle**
+        let lt = gp.buttons[6].value;
+        if (lt > DEAD_ZONE && lastHandTrigger <= DEAD_ZONE) {
+            handDirection *= -1; // Toggle direction
+            command = { command: "move", motor: "hand", direction: handDirection > 0 ? "inc" : "dec" };
+        } else if (lt <= DEAD_ZONE && lastHandTrigger > DEAD_ZONE) {
+            command = { command: "stop", motor: "hand" };
+        }
+        lastHandTrigger = lt;
+
+        // **RIGHT TRIGGER (RT) for Thumb Toggle**
+        let rt = gp.buttons[7].value;
+        if (rt > DEAD_ZONE && lastThumbTrigger <= DEAD_ZONE) {
+            thumbDirection *= -1; // Toggle direction
+            command = { command: "move", motor: "thumb", direction: thumbDirection > 0 ? "inc" : "dec" };
+        } else if (rt <= DEAD_ZONE && lastThumbTrigger > DEAD_ZONE) {
+            command = { command: "stop", motor: "thumb" };
+        }
+        lastThumbTrigger = rt;
+
+        if (command && now - lastMoveTime > MOVE_DELAY) {
+            sendCommand(command);
+            console.log("Gamepad Command:", command);
+            lastMoveTime = now;
+            lastCommands[command.motor] = command.command;
+        }
+
+        requestAnimationFrame(updateGamepad);
+    }
+
+    window.addEventListener("load", () => {
+        setTimeout(checkForGamepads, 500); // Delay to allow browser to detect gamepads
+    });
+
+    function checkForGamepads() {
+        const gamepads = navigator.getGamepads();
+        if (gamepads[0]) {
+            console.log("Gamepad detected on page load.");
+            updateGamepadStatus(true);
+            requestAnimationFrame(updateGamepad);
+        }
+    }
+
+    // ==== WEBRTC VIDEO CONNECTION ====
+    let videoWs = null;
+    let pc = null;
+    let videoConnected = false;
+    let statsInterval = null;
+    const videoEl = document.getElementById('video');
+    const startVideoBtn = document.getElementById('startVideoBtn');
+    const stopVideoBtn = document.getElementById('stopVideoBtn');
+    const videoStatus = document.getElementById('videoStatus');
+    const latencyEl = document.getElementById('latency');
+    const framerateEl = document.getElementById('framerate');
+    const resolutionEl = document.getElementById('resolution');
+
+    function updateVideoButtonState(isConnected) {
+        startVideoBtn.disabled = isConnected;
+        stopVideoBtn.disabled = !isConnected;
+    }
+
+
+function connectVideoSocket() {
+    const url = "ws://secretundergroundroboticslaboratory.com/ws";
+    console.error(`DEBUGGING: Attempting to connect to Video WebSocket: ${url}`);
+    
+    try {
+        videoWs = new WebSocket(url);
+
+        videoWs.onopen = () => {
+            console.error(`DEBUGGING: Video WebSocket connection OPENED to ${url}`);
+            videoStatus.innerText = "Video: Connected to server";
+            setupPeerConnection();
+        };
+
+        videoWs.onclose = (event) => {
+            console.error(`DEBUGGING: Video WebSocket connection CLOSED`, {
+                wasClean: event.wasClean,
+                code: event.code,
+                reason: event.reason
+            });
+            videoStatus.innerText = "Video: Disconnected";
+            videoConnected = false;
+            updateVideoButtonState(false);
+            stopStats();
+            if (pc) {
+                pc.close();
+                pc = null;
+            }
+        };
+
+        videoWs.onerror = (error) => {
+            console.error(`DEBUGGING: Video WebSocket ERROR`, {
+                error: JSON.stringify(error)
+            });
+            videoStatus.innerText = "Video: Connection error";
+        };
+
+        videoWs.onmessage = async (event) => {
+            console.error(`DEBUGGING: Video WebSocket MESSAGE received:`, event.data);
+            try {
+                const data = JSON.parse(event.data);
+                console.log(`Received ${data.type} from video server`);
+                
+                switch (data.type) {
+                    case "offer":
+                        await handleVideoOffer(data);
+                        break;
+                    case "ice-candidate":
+                        if (data.candidate && pc) {
+                            try {
+                                await pc.addIceCandidate(data.candidate);
+                            } catch (error) {
+                                console.error("Error adding received ICE candidate:", error);
+                            }
+                        }
+                        break;
+                    case "error":
+                        console.error(`Video server error: ${data.error} - ${data.message}`);
+                        break;
+                }
+            } catch (error) {
+                console.error("Error processing video message:", error);
+            }
+        };
+    } catch (err) {
+        console.error(`DEBUGGING: Exception in connectVideoSocket:`, err);
+    }
+}
+
+
+
+
+
+
+
+    async function handleVideoOffer(data) {
+        if (!pc) return;
+        
+        try {
+            await pc.setRemoteDescription(new RTCSessionDescription({ 
+                type: "offer", 
+                sdp: data.sdp 
+            }));
+            
+            // Create answer with low latency constraints
+            const answer = await pc.createAnswer({
+                iceRestart: false,
+                voiceActivityDetection: false
+            });
+            
+            // Add low latency SDP modifications
+            answer.sdp = answer.sdp.replace('useinbandfec=1', 'useinbandfec=1; stereo=0; maxaveragebitrate=128000; maxplaybackrate=48000; cbr=0');
+            
+            await pc.setLocalDescription(answer);
+            
+            videoWs.send(JSON.stringify({ 
+                type: "answer", 
+                sdp: answer.sdp 
+            }));
+            
+            console.log("Sent SDP answer with low latency settings");
+        } catch (error) {
+            console.error("Error handling video offer:", error);
+            videoStatus.innerText = "Video: Error connecting";
+        }
+    }
+
+    function setupPeerConnection() {
+        if (pc) {
+            pc.close();
+        }
+        
+        // Create peer connection with no STUN servers for direct client-server
+        pc = new RTCPeerConnection({
+            iceServers: [], // Empty - no STUN/TURN needed for direct connection
+            bundlePolicy: 'max-bundle',
+            rtcpMuxPolicy: 'require',
+            sdpSemantics: 'unified-plan'
+        });
+        
+        // Handle ICE candidates
+        pc.onicecandidate = (event) => {
+            if (event.candidate && videoWs && videoWs.readyState === WebSocket.OPEN) {
+                videoWs.send(JSON.stringify({ 
+                    type: "ice-candidate", 
+                    candidate: event.candidate 
+                }));
+            }
+        };
+        
+        // Handle connection state changes
+        pc.onconnectionstatechange = () => {
+            console.log(`WebRTC connection state: ${pc.connectionState}`);
+            
+            if (pc.connectionState === 'connected') {
+                videoStatus.innerText = "Video: Stream Active";
+                videoConnected = true;
+                updateVideoButtonState(true);
+                startStats();
+            } else if (pc.connectionState === 'disconnected' || 
+                       pc.connectionState === 'failed' || 
+                       pc.connectionState === 'closed') {
+                videoStatus.innerText = "Video: Disconnected";
+                videoConnected = false;
+                updateVideoButtonState(false);
+                stopStats();
+            }
+        };
+        
+        // Handle incoming tracks
+        pc.ontrack = (event) => {
+            console.log("Received remote video stream");
+            
+            const stream = event.streams[0];
+            
+            // Configure video element for low latency
+            videoEl.srcObject = stream;
+            videoEl.play();
+            
+            // These are important for low latency!
+            videoEl.muted = true;
+            videoEl.autoplay = true;
+            videoEl.playsInline = true;
+        };
+        
+        // Request an offer from the server
+        if (videoWs && videoWs.readyState === WebSocket.OPEN) {
+            videoWs.send(JSON.stringify({ type: "offer" }));
+        }
+    }
+
+    function startStats() {
+        if (statsInterval) {
+            clearInterval(statsInterval);
+        }
+        
+        let lastFramesDecoded = 0;
+        let lastTime = performance.now();
+        
+        statsInterval = setInterval(async () => {
+            if (!pc) return;
+            
+            try {
+                const stats = await pc.getStats();
+                let frameRate = 0;
+                let width = 0;
+                let height = 0;
+                let currentDelay = 0;
+                let jitter = 0;
+                
+                stats.forEach(report => {
+                    if (report.type === 'inbound-rtp' && report.kind === 'video') {
+                        const now = performance.now();
+                        const timeElapsed = (now - lastTime) / 1000; // Convert to seconds
+                        
+                        if (lastFramesDecoded && timeElapsed > 0) {
+                            frameRate = ((report.framesDecoded - lastFramesDecoded) / timeElapsed).toFixed(1);
+                        }
+                        
+                        lastFramesDecoded = report.framesDecoded;
+                        lastTime = now;
+                        
+                        jitter = report.jitter ? (report.jitter * 1000).toFixed(1) + ' ms' : 'N/A';
+                        currentDelay = report.jitterBufferDelay ? 
+                            (report.jitterBufferDelay * 1000).toFixed(1) + ' ms' : 'N/A';
+                        
+                        latencyEl.textContent = currentDelay !== 'N/A' ? 
+                            currentDelay + ' (jitter: ' + jitter + ')' : 'N/A';
+                    }
+                    
+                    if (report.type === 'track' && report.kind === 'video') {
+                        width = report.frameWidth;
+                        height = report.frameHeight;
+                        framerateEl.textContent = frameRate + ' fps';
+                        resolutionEl.textContent = width + 'x' + height;
+                    }
+                });
+            } catch (e) {
+                console.error("Error getting stats:", e);
+            }
+        }, 1000);
+    }
+    
+    function stopStats() {
+        if (statsInterval) {
+            clearInterval(statsInterval);
+            statsInterval = null;
+        }
+        
+        latencyEl.textContent = 'N/A';
+        framerateEl.textContent = 'N/A';
+        resolutionEl.textContent = 'N/A';
+    }
+
+    // Button handlers
+    startVideoBtn.addEventListener("click", () => {
+        connectVideoSocket();
+    });
+    
+    stopVideoBtn.addEventListener("click", () => {
+        if (pc) {
+            pc.close();
+            pc = null;
+        }
+        
+        if (videoEl.srcObject) {
+            videoEl.srcObject.getTracks().forEach(track => track.stop());
+            videoEl.srcObject = null;
+        }
+        
+        if (videoWs) {
+            videoWs.close();
+            videoWs = null;
+        }
+        
+        videoConnected = false;
+        videoStatus.innerText = "Video: Disconnected";
+        updateVideoButtonState(false);
+        stopStats();
+    });
+</script>
+</body>
+</html>

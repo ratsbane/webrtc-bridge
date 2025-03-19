@@ -1,0 +1,45 @@
+<VirtualHost *:80>
+    ServerName secretundergroundroboticslaboratory.com
+    DocumentRoot /var/www/surl
+    ErrorLog ${APACHE_LOG_DIR}/error.log
+    CustomLog ${APACHE_LOG_DIR}/access.log combined
+
+    # Enable necessary modules
+    <IfModule mod_proxy.c>
+        <IfModule mod_proxy_wstunnel.c>
+            # 1. WebRTC Video WebSocket proxy
+            ProxyPass /ws ws://127.0.0.1:8080/ws
+            ProxyPassReverse /ws ws://127.0.0.1:8080/ws
+            
+            # 2. Robot Control WebSocket proxy (to Raspberry Pi)
+            ProxyPass /robot-control ws://192.168.2.168:8000/ws
+            ProxyPassReverse /robot-control ws://192.168.2.168:8000/ws
+            
+            # Set larger timeout values for WebSocket connections
+            ProxyTimeout 3600
+            
+            # WebSocket connection settings
+            RewriteEngine On
+            
+            # Rewrite rule for WebRTC video
+            RewriteCond %{HTTP:Upgrade} =websocket [NC]
+            RewriteRule /ws(.*) ws://127.0.0.1:8080/ws$1 [P,L]
+            
+            # Rewrite rule for robot control
+            RewriteCond %{HTTP:Upgrade} =websocket [NC]
+            RewriteRule /robot-control(.*) ws://192.168.2.168:8000/ws$1 [P,L]
+        </IfModule>
+    </IfModule>
+
+    # Set CORS headers to allow WebRTC connections
+    <IfModule mod_headers.c>
+        Header always set Access-Control-Allow-Origin "*"
+        Header always set Access-Control-Allow-Methods "GET, POST, OPTIONS"
+        Header always set Access-Control-Allow-Headers "Origin, X-Requested-With, Content-Type, Accept"
+    </IfModule>
+    
+    # Optimize for streaming connections
+    <IfModule mod_reqtimeout.c>
+        RequestReadTimeout header=10-30,MinRate=500 body=30,MinRate=500
+    </IfModule>
+</VirtualHost>
